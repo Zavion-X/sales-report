@@ -8,16 +8,35 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
+FIELDS = ("date", "product", "quantity", "price")
+
+
+def parse_sale(date_text, product, quantity_text, price_text):
+    quantity = int(quantity_text)
+    return {
+        "date": date.fromisoformat(date_text),
+        "product": product,
+        "quantity": quantity,
+        "total": quantity * float(price_text),
+    }
+
+
 def read_sales(lines):
-    """Parse sales from an iterable of CSV text lines."""
+    """Parse sales from CSV text lines whose header names the four fields."""
     for row in csv.DictReader(lines):
-        quantity = int(row["quantity"])
-        yield {
-            "date": date.fromisoformat(row["date"]),
-            "product": row["product"],
-            "quantity": quantity,
-            "total": quantity * float(row["price"]),
-        }
+        yield parse_sale(row["date"], row["product"], row["quantity"], row["price"])
+
+
+def read_sales_mapped(rows, indices):
+    """Parse sales from lists of cells; indices maps each field to its column number."""
+    for n, row in enumerate(rows, start=2):  # row 1 is the header
+        try:
+            sale = parse_sale(*(row[indices[field]] for field in FIELDS))
+        except IndexError:
+            raise ValueError(f"row {n} doesn't have enough columns") from None
+        except ValueError as e:
+            raise ValueError(f"row {n}: {e}") from None
+        yield sale
 
 
 def load_sales(path):
