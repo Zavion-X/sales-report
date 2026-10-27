@@ -1,5 +1,6 @@
 import argparse
 import csv
+import difflib
 import re
 import sys
 from collections import defaultdict
@@ -27,37 +28,6 @@ FIELDS = {
 
 # Fields that get a "sales by ..." breakdown
 GROUPS = ["product", "category", "customer", "branch", "payment", "staff"]
-
-# Header names recognised on sight, so columns can be filled in automatically
-HEADER_NAMES = {
-    "date": ["date", "day", "order date", "sale date", "sold on", "transaction date", "datetime"],
-    "product": ["product", "item", "item name", "product name"],
-    "quantity": ["quantity", "qty", "units"],
-    "price": ["price", "unit price", "price per item"],
-    "total": ["total", "total sales", "sales", "revenue", "amount", "total price", "line total"],
-    "category": ["category", "product category"],
-    "customer": ["customer", "customer name", "client"],
-    "branch": ["branch", "store", "location", "shop"],
-    "cost": ["cost", "total cost"],
-    "unit_cost": ["unit cost", "cost per item"],
-    "payment": ["payment method", "payment", "payment type", "paid by"],
-    "order_id": ["order id", "order", "order number", "transaction id", "receipt", "invoice"],
-    "staff": ["staff", "employee", "cashier", "server", "salesperson"],
-}
-HEADER_LOOKUP = {name: key for key, names in HEADER_NAMES.items() for name in names}
-
-
-def guess_columns(header):
-    """For each header cell, the field it most likely is (or None). First match wins."""
-    guesses, taken = [], set()
-    for name in header:
-        key = HEADER_LOOKUP.get(re.sub(r"[\s_-]+", " ", name.strip().lower()))
-        if key in taken:
-            key = None
-        taken.add(key)
-        guesses.append(key)
-    return guesses
-
 
 # ---------- dates ----------
 
@@ -101,13 +71,132 @@ def date_order(texts):
     return "unknown" if seen else "none"
 
 
-# ---------- reading ----------
+# ---------- guessing which column is which ----------
 
-def _number(label, text):
+# Names that mean each field. Capitals, spaces, underscores and punctuation are
+# ignored when comparing, so "Cost_Price", "cost price" and "COSTPRICE" are the same.
+# A name can belong to two fields ("amount"); the values then decide which one.
+HEADER_NAMES = {
+    "date": ["date", "day", "order date", "sale date", "sold date", "sold on",
+             "transaction date", "purchase date", "date of sale", "datetime", "timestamp"],
+    "product": ["product", "product name", "item", "item name", "menu item", "goods", "article"],
+    "quantity": ["quantity", "qty", "units", "units sold", "unit sold", "qty sold",
+                 "amount", "count", "pieces", "pcs", "number of items", "no of items"],
+    "price": ["price", "unit price", "price per item", "item price", "selling price",
+              "sale price", "price each"],
+    "total": ["total", "total sales", "sales", "revenue", "total price", "line total",
+              "grand total", "sale amount", "total amount", "net sales", "amount"],
+    "category": ["category", "product category", "item category", "type", "product type",
+                 "department"],
+    "customer": ["customer", "customer name", "client", "client name", "buyer", "shopper",
+                 "guest", "member"],
+    "branch": ["branch", "branch name", "store", "store name", "location", "shop",
+               "shop name", "outlet", "site"],
+    "cost": ["cost", "total cost", "cost price", "cogs"],
+    "unit_cost": ["unit cost", "cost per item", "cost per unit", "item cost"],
+    "payment": ["payment method", "payment", "payment type", "payment mode", "paid by",
+                "pay mode", "tender"],
+    "order_id": ["order id", "order", "order number", "order no", "transaction id",
+                 "transaction", "receipt", "receipt number", "invoice", "invoice number",
+                 "invoice no", "ticket"],
+    "staff": ["staff", "staff name", "employee", "employee name", "cashier", "server",
+              "salesperson", "sales rep", "seller", "waiter", "barista"],
+}
+
+# Payment words, so a column of "Card" / "Cash" / "Visa" is recognised by its values
+_PAYMENT_WORDS = {"cash", "card", "credit", "debit", "creditcard", "debitcard", "visa",
+                  "mastercard", "amex", "americanexpress", "paypal", "applepay", "googlepay",
+                  "gpay", "venmo", "upi", "cheque", "check", "banktransfer", "transfer",
+                  "mobile", "mobilepay", "giftcard", "voucher", "contactless"}
+
+_SAMPLE_ROWS = 500
+
+
+def _norm(text):
+    """Lower-case, without anything in brackets, and only letters and digits."""
+    return re.sub(r"[^a-z0-9]", "", re.sub(r"[(\[].*?[)\]]", " ", text.lower()))
+
+
+_LOOKUP = {}
+for _key, _names in HEADER_NAMES.items():
+    for _name in _names:
+        _LOOKUP.setdefault(_norm(_name), []).append(_key)
+
+
+def _as_number(text):
     try:
         return float(text.strip().lstrip("$£€₹¥").replace(",", ""))
     except ValueError:
-        raise ValueError(f"{label} '{text}' isn't a number") from None
+        return None
+
+
+def _is_date(text):
+    for day_first in (True, False):
+        try:
+            parse_date(text, day_first)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
+def _mostly(values, test, share=0.9):
+    return sum(1 for v in values if test(v)) >= share * len(values)
+
+
+def _fits(key, values):
+    """Do these values make sense for this kind of column?"""
+    if key in ("price", "total", "cost", "unit_cost"):
+        return _mostly(values, lambda v: _as_number(v) is not None)
+    if key == "quantity":
+        return _mostly(values, lambda v: _as_number(v) is not None and _as_number(v).is_integer())
+    if key == "date":
+        return _mostly(values, _is_date)
+    return True
+
+
+def guess_columns(header, rows=()):
+    """For each column, a guess (field, how) or None when nothing fits well.
+
+    `how` says what the guess is based on: "name" (the header is a known name),
+    "similar" (a close spelling or variant of one) or "data" (the values look like
+    dates or payment methods). A name match is only kept if the values agree, so a
+    "Date" column full of words is not trusted. Each field is given to one column."""
+    rows = list(rows)[:_SAMPLE_ROWS]
+    candidates = []  # (score, column, field, how); better evidence wins, then leftmost
+    for i, name in enumerate(header):
+        values = [r[i].strip() for r in rows if i < len(r) and r[i].strip()]
+        if rows and not values:
+            continue  # an empty column can't be anything
+
+        norm = _norm(name)
+        how, keys = "name", _LOOKUP.get(norm)
+        if not keys and len(norm) >= 4:
+            close = difflib.get_close_matches(norm, _LOOKUP, n=1, cutoff=0.84)
+            how, keys = "similar", _LOOKUP[close[0]] if close else None
+        key = next((k for k in keys or [] if not rows or _fits(k, values)), None)
+        if key:
+            candidates.append((3 if how == "name" else 2, i, key, how))
+        elif rows and _fits("date", values):
+            candidates.append((1, i, "date", "data"))
+        elif rows and _mostly(values, lambda v: _norm(v) in _PAYMENT_WORDS, share=0.8):
+            candidates.append((1, i, "payment", "data"))
+
+    guesses, used = [None] * len(header), set()
+    for _, i, key, how in sorted(candidates, key=lambda c: (-c[0], c[1])):
+        if guesses[i] is None and key not in used:
+            guesses[i] = (key, how)
+            used.add(key)
+    return guesses
+
+
+# ---------- reading ----------
+
+def _number(label, text):
+    value = _as_number(text)
+    if value is None:
+        raise ValueError(f"{label} '{text}' isn't a number")
+    return value
 
 
 def _whole(label, text):
@@ -436,7 +525,7 @@ def main(path=HERE / "sales.csv"):
         return
     header, rows = table[0], table[1:]
 
-    columns = {key: i for i, key in enumerate(guess_columns(header)) if key}
+    columns = {g[0]: i for i, g in enumerate(guess_columns(header, rows)) if g}
     if not columns:
         sys.exit(f"Error: no column names in '{path}' that I recognise. Expected headers "
                  "such as date, product, quantity, price.")

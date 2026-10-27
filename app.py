@@ -13,8 +13,15 @@ PREVIEW_ROWS = 5
 PER_ROW = 4  # preview columns per row, so wide files wrap instead of getting cramped
 GROUP_ROWS = 10
 IGNORE = "Ignore"
-LABELS = list(FIELDS.values()) + [IGNORE]
+LABELS = [IGNORE] + sorted(FIELDS.values())  # Ignore first, the rest A to Z
 KEY_OF = {label: key for key, label in FIELDS.items()}
+
+# Shown under each dropdown, so the user can see what was filled in for them
+AUTO_NOTES = {
+    "name": "✨ Auto-filled from the name",
+    "similar": "✨ Auto-filled from a similar name, please check",
+    "data": "✨ Auto-filled from the values, please check",
+}
 
 st.set_page_config(page_title="Sales report", page_icon="📊")
 st.title("Sales report")
@@ -38,28 +45,36 @@ if not table:
 header, rows = table[0], table[1:]
 
 st.subheader("Choose what each column is")
-st.caption(f"First {PREVIEW_ROWS} rows. Set each column you want to use and leave the "
-           "rest on Ignore. Price and Unit cost are per item, while Total sales and "
-           "Cost are for the whole sale.")
-guesses = guess_columns(header)
+st.caption(f"First {PREVIEW_ROWS} rows. ✨ marks dropdowns filled in for you, so please "
+           "check them. Set the others yourself, and leave any you don't need on Ignore. "
+           "Price and Unit cost are per item, while Total sales and Cost are for the whole sale.")
+guesses = guess_columns(header, rows)
 choices = []
 for start in range(0, len(header), PER_ROW):
     cells = st.columns(min(PER_ROW, len(header)))
     for i in range(start, min(start + PER_ROW, len(header))):
         name = header[i].strip() or f"Column {i + 1}"
         with cells[i - start]:
-            choices.append(st.selectbox(
-                name, LABELS,
-                index=LABELS.index(FIELDS[guesses[i]] if guesses[i] else IGNORE),
+            guess = guesses[i]
+            suggested = FIELDS[guess[0]] if guess else IGNORE
+            choice = st.selectbox(
+                name, LABELS, index=LABELS.index(suggested),
                 key=f"column-{uploaded.file_id}-{i}",
                 label_visibility="collapsed",
-            ))
+            )
+            choices.append(choice)
+            if choice != suggested:
+                st.caption("✏️ Changed by you" if guess else "✏️ Set by you")
+            elif guess:
+                st.caption(AUTO_NOTES[guess[1]])
+            else:
+                st.caption("⚠️ No match: choose one if you need it")
             st.dataframe(
                 pd.DataFrame({name: [r[i] if i < len(r) else "" for r in rows[:PREVIEW_ROWS]]}),
                 hide_index=True,
             )
 
-repeated = [label for label in LABELS[:-1] if choices.count(label) > 1]
+repeated = [label for label in LABELS if label != IGNORE and choices.count(label) > 1]
 if repeated:
     st.warning("More than one column is set to " + ", ".join(repeated)
                + ". Each can only be used once.")
