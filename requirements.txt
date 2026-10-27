@@ -1,0 +1,3 @@
+streamlit>=1.66
+matplotlib>=3.11
+pandas>=3.1
