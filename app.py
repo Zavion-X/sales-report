@@ -1,9 +1,10 @@
 import io
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from report import build_monthly_chart, month_label, read_sales, summarize
+from report import build_monthly_chart, build_pdf, month_label, read_sales, summarize
 
 st.set_page_config(page_title="Sales report", page_icon="📊")
 st.title("Sales report")
@@ -48,4 +49,11 @@ st.dataframe(
         "Sales": [f"${t:,.2f}" for t in summary["by_month"].values()],
     }),
     hide_index=True,
+)
+
+st.download_button(
+    "Download PDF",
+    data=build_pdf(summary, title=f"Sales report: {uploaded.name}"),
+    file_name=f"{Path(uploaded.name).stem}_report.pdf",
+    mime="application/pdf",
 )

@@ -92,6 +92,43 @@ def build_monthly_chart(by_month):
     return fig
 
 
+def build_pdf(summary, title="Sales report"):
+    """Return a one-page PDF (as bytes) with the totals, best seller and chart."""
+    import io
+    from fpdf import FPDF
+
+    # The built-in PDF fonts only cover Latin-1, so swap anything else for "?"
+    def latin1(text):
+        return text.encode("latin-1", "replace").decode("latin-1")
+
+    fig = build_monthly_chart(summary["by_month"])
+    chart = io.BytesIO()
+    fig.savefig(chart, format="png", facecolor=fig.get_facecolor())
+    chart.seek(0)
+
+    pdf = FPDF()
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.cell(0, 12, latin1(title), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    for label, value in [
+        ("Total sales", f"${summary['total']:,.2f}"),
+        ("Sales", f"{summary['count']} ({summary['items']} items)"),
+        ("Best seller", f"{summary['best']} ({summary['best_units']} units, "
+                        f"${summary['best_revenue']:,.2f})"),
+    ]:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(35, 8, label)
+        pdf.set_font("Helvetica", "", 12)
+        pdf.cell(0, 8, latin1(value), new_x="LMARGIN", new_y="NEXT")
+
+    pdf.ln(6)
+    pdf.image(chart, w=pdf.epw)
+    return bytes(pdf.output())
+
+
 def save_monthly_chart(by_month, out_path):
     try:
         fig = build_monthly_chart(by_month)
